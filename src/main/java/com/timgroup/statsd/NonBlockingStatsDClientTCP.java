@@ -1,44 +1,15 @@
 package com.timgroup.statsd;
 
-import java.net.DatagramPacket;
-import java.net.DatagramSocket;
+import java.io.IOException;
+import java.io.PrintWriter;
 import java.net.InetSocketAddress;
-import java.text.NumberFormat;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.TimeUnit;
+import java.net.Socket;
 
-/**
- * A simple StatsD client implementation facilitating metrics recording.
- *
- * <p>Upon instantiation, this client will establish a socket connection to a StatsD instance
- * running on the specified host and port. Metrics are then sent over this connection as they are
- * received by the client.
- * </p>
- *
- * <p>Three key methods are provided for the submission of data-points for the application under
- * scrutiny:
- * <ul>
- *   <li>{@link #incrementCounter} - adds one to the value of the specified named counter</li>
- *   <li>{@link #recordGaugeValue} - records the latest fixed value for the specified named gauge</li>
- *   <li>{@link #recordExecutionTime} - records an execution time in milliseconds for the specified named operation</li>
- *   <li>{@link #recordHistogramValue} - records a value, to be tracked with average, maximum, and percentiles</li>
- * </ul>
- * From the perspective of the application, these methods are non-blocking, with the resulting
- * IO operations being carried out in a separate thread. Furthermore, these methods are guaranteed
- * not to throw an exception which may disrupt application execution.
- * </p>
- *
- * <p>As part of a clean system shutdown, the {@link #stop()} method should be invoked
- * on any StatsD clients.</p>
- *
- * @author Tom Denley
- *
- */
-public class NonBlockingStatsDClient extends StatsDClientCommon {
-
-    private final DatagramSocket clientSocket;
+public class NonBlockingStatsDClientTCP extends StatsDClientCommon {
+    protected boolean socketConnected = false;
+    protected Socket clientTCPSocket;
+    protected PrintWriter writer;
+    private InetSocketAddress statsdAddress;
 
     /**
      * Create a new StatsD client communicating with a StatsD instance on the
@@ -59,7 +30,7 @@ public class NonBlockingStatsDClient extends StatsDClientCommon {
      * @throws StatsDClientException
      *     if the client could not be started
      */
-    public NonBlockingStatsDClient(String prefix, String hostname, int port) throws StatsDClientException {
+    public NonBlockingStatsDClientTCP(String prefix, String hostname, int port) throws StatsDClientException {
         this(prefix, hostname, port, null, NO_OP_HANDLER);
     }
 
@@ -84,7 +55,7 @@ public class NonBlockingStatsDClient extends StatsDClientCommon {
      * @throws StatsDClientException
      *     if the client could not be started
      */
-    public NonBlockingStatsDClient(String prefix, String hostname, int port, String[] constantTags) throws StatsDClientException {
+    public NonBlockingStatsDClientTCP(String prefix, String hostname, int port, String[] constantTags) throws StatsDClientException {
         this(prefix, hostname, port, constantTags, NO_OP_HANDLER);
     }
 
@@ -112,40 +83,55 @@ public class NonBlockingStatsDClient extends StatsDClientCommon {
      * @throws StatsDClientException
      *     if the client could not be started
      */
-    public NonBlockingStatsDClient(String prefix, String hostname, int port, String[] constantTags, StatsDClientErrorHandler errorHandler) throws StatsDClientException {
+    public NonBlockingStatsDClientTCP(String prefix, String hostname, int port, String[] constantTags, StatsDClientErrorHandler errorHandler) throws StatsDClientException {
         super(prefix, constantTags, errorHandler);
 
         try {
-            this.clientSocket = new DatagramSocket();
-            this.clientSocket.connect(new InetSocketAddress(hostname, port));
+            statsdAddress = new InetSocketAddress(hostname, port);
         } catch (Exception e) {
-            throw new StatsDClientException("Failed to start StatsD client", e);
+            throw new StatsDClientException("Failed to initialize StatsD client", e);
         }
     }
 
-    /**
-     * Cleanly shut down this StatsD client. This method may throw an exception if
-     * the socket cannot be closed.
-     */
+    protected void establishConnection() throws IOException {
+        if (clientTCPSocket != null) {
+            clientTCPSocket.close();
+        }
+        clientTCPSocket = new Socket();
+        clientTCPSocket.connect(statsdAddress);
+
+        writer = new PrintWriter(clientTCPSocket.getOutputStream());
+
+        socketConnected = true;
+    }
+
+    protected void blockingSend(String message) {
+        try {
+            if (!socketConnected) {
+                establishConnection();
+            }
+            writer.append(message);
+            writer.append("\n");
+            writer.flush();
+        } catch (Exception e) {
+            socketConnected = false;
+            handler.handle(e);
+        }
+    }
+
     @Override
     public void stop() {
         try {
             super.stop();
         } finally {
-            if (clientSocket != null) {
-                clientSocket.close();
+            if (clientTCPSocket != null) {
+                try {
+                    clientTCPSocket.close();
+                    clientTCPSocket = null;
+                } catch (IOException e) {
+                    handler.handle(e);
+                }
             }
-        }
-    }
-
-
-    protected void blockingSend(String message) {
-        try {
-            final byte[] sendData = message.getBytes();
-            final DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length);
-            clientSocket.send(sendPacket);
-        } catch (Exception e) {
-            handler.handle(e);
         }
     }
 }
